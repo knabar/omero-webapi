@@ -23,6 +23,7 @@
 from __future__ import with_statement
 
 import os
+import re
 import shutil
 import tempfile
 import logging
@@ -45,12 +46,17 @@ logger = logging.getLogger(__name__)
 #logger.addHandler(logging.StreamHandler(sys.stdout))
 
 
-def chunk_copy(source, target):
+def chunk_copy(source, target, start=None, end=None):
     chunk_size = getattr(settings, 'MPU_CHUNK_SIZE', 64 * 1024)
+    if start > 0:
+        source.seek(start)
+    to_read = (end - (start or 0) + 1) if end else None
     while True:
-        chunk = source.read(chunk_size)
+        chunk = source.read(min(chunk_size, to_read) if to_read > -1 else chunk_size)
         if not chunk:
             break
+        if to_read:
+            to_read -= len(chunk)
         target.write(chunk)
 
 def touch(fname, times=None):
@@ -159,8 +165,8 @@ class MultiPartUpload(django.views.generic.View):
         _delete_upload(objectname)
 
 
-@login_required
-def clean_incomplete_mpus(request):
+@login_required()
+def clean_incomplete_mpus(request, conn, **kwargs):
     now = time.time()
     rdict = dict()
     path = get_temp_path()
@@ -179,3 +185,38 @@ def clean_incomplete_mpus(request):
     json = simplejson.dumps(rdict, ensure_ascii=False)
     return HttpResponse(json, mimetype='application/javascript')
 
+
+@login_required()
+def download(request, objectname, conn, **kwargs):
+
+    def parse_range(request, size):
+        # See http://www.w3.org/Protocols/rfc2616/rfc2616-sec14.html#sec14.35
+        m = re.match(r"^bytes=(\d*)-(\d*)$", request.META.get('HTTP_RANGE', ''))
+        if not m:
+            return 200, 0, size - 1
+        try:
+            start = int(m.group(1) or 0)
+            end = int(m.group(2) or (size - 1))
+            if start == 0 and end == size - 1:
+                return 200, start, end
+            if start <= end:
+                if end >= size:
+                    return 416, start, end
+                else:
+                    return 206, start, end
+        except ValueError:
+            pass
+        return 416, 0, size - 1
+
+    # need to check access and retrieve actual file
+    from StringIO import StringIO
+    sourcefile = StringIO('0123456789')
+    filesize = 10
+
+    code, start, end = parse_range(request, filesize)
+    response = HttpResponse(status=code, content_type='application/octet-stream')
+    if code < 400:
+        response['Content-Length'] = end - start + 1
+        chunk_copy(sourcefile, response, start, end)
+
+    return response
