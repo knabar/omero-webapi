@@ -1,3 +1,25 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+#
+# Copyright (C) 2012 University of Dundee & Open Microscopy Environment.
+# All rights reserved.
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+
 from __future__ import with_statement
 
 import os
@@ -8,13 +30,19 @@ import time
 import settings
 import traceback
 from uuid import uuid4 as uuid
+from path import path
 
 import django.views.generic
 from django.http import HttpResponse, HttpResponseForbidden
 from django.utils import simplejson
 
+from decorators import login_required, cloak_self, uncloak_self
+
 
 logger = logging.getLogger(__name__)
+#logger = logging.getLogger('omeroweb.decorators')
+#import sys
+#logger.addHandler(logging.StreamHandler(sys.stdout))
 
 
 def chunk_copy(source, target):
@@ -41,13 +69,12 @@ def _delete_upload(objectname):
     shutil.rmtree(os.path.dirname(objectname), ignore_errors=True)
 
 
-# TODO: check access controls, etc.
-
-
 def process_request(require_uploadId):
     def decorate_method(method):
-        def decorated(self, request, objectname):
-            
+        @cloak_self
+        @login_required()
+        @uncloak_self
+        def decorated(self, request, objectname, conn, **kwargs):
             if os.path.basename(objectname) != objectname:
                 return HttpResponseForbidden()
             uploadId = request.GET.get('uploadId')
@@ -59,14 +86,12 @@ def process_request(require_uploadId):
                 touch(os.path.join(path, objectname))
             elif require_uploadId:
                 return HttpResponseForbidden()
-            
             try:
                 rdict = {'bad': 'false'}
-                rdict.update(method(self, request, objectname))
+                rdict.update(method(self, request, objectname, conn, **kwargs))
             except Exception, ex:
                 logger.error(traceback.format_exc())
                 rdict = {'bad': 'true', 'errs': str(ex)}
-            
             json = simplejson.dumps(rdict, ensure_ascii=False)
             return HttpResponse(json, mimetype='application/javascript')
         return decorated
@@ -76,23 +101,23 @@ def process_request(require_uploadId):
 class MultiPartUpload(django.views.generic.View):
 
     @process_request(require_uploadId=True)
-    def get(self, request, objectname):
+    def get(self, request, objectname, conn, **kwargs):
         rdict = {}
         if objectname:
             rdict['parts'] = self._get_parts(objectname)
         return rdict
 
     @process_request(require_uploadId=False)
-    def post(self, request, objectname):
+    def post(self, request, objectname, conn, **kwargs):
         rdict = {}
         if request.GET.has_key('uploads'):
             rdict['uploadId'] = self._initiate_upload(objectname)
         else:
             self._complete_upload(objectname)
         return rdict
-    
+
     @process_request(require_uploadId=True)
-    def put(self, request, objectname):
+    def put(self, request, objectname, conn, **kwargs):
         rdict = {}
         try:
             partNumber = int(request.GET.get('partNumber'))
@@ -105,7 +130,7 @@ class MultiPartUpload(django.views.generic.View):
         return rdict
 
     @process_request(require_uploadId=True)
-    def delete(self, request, objectname):
+    def delete(self, request, objectname, conn, **kwargs):
         rdict = {}
         self._delete_upload(objectname)
         return rdict
@@ -134,6 +159,7 @@ class MultiPartUpload(django.views.generic.View):
         _delete_upload(objectname)
 
 
+@login_required
 def clean_incomplete_mpus(request):
     now = time.time()
     rdict = dict()
@@ -152,4 +178,4 @@ def clean_incomplete_mpus(request):
             _delete_upload(master)
     json = simplejson.dumps(rdict, ensure_ascii=False)
     return HttpResponse(json, mimetype='application/javascript')
-    
+
